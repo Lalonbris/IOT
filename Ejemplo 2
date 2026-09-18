@@ -1,0 +1,124 @@
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_log.h"
+
+static const char *TAG = "SISTEMA";
+
+// ============================================================
+//  COMUNICACION POR COLAS (QUEUES) - ESP32-C6 (1 solo nucleo)
+//
+//  Patron: Productor -> [Cola] -> Consumidor
+//
+//  Ventaja vs vTaskDelay puro:
+//  - El Consumidor duerme 100% inactivo (0% CPU) mientras
+//    la cola esta vacia. No "polling", no despertar innecesario.
+//  - FreeRTOS despierta al Consumidor JUSTO cuando llega un dato.
+// ============================================================
+
+// 1. Definimos la estructura de los datos que vamos a enviar por la cola
+typedef struct {
+    int   id_lectura;
+    float temperatura;
+} datos_sensor_t;
+
+// 2. Declaramos el manejador de la cola (global para ambas tareas)
+QueueHandle_t cola_sensor = NULL;
+
+// -------------------------------------------------------
+// TAREA 1: Productora
+// Simula la lectura de un sensor y ENVIA el dato a la cola.
+// Controla el ritmo de muestreo con vTaskDelay (cada 2 seg).
+// -------------------------------------------------------
+void vTareaProductora(void *pvParameters) {
+    int contador = 0;
+    datos_sensor_t muestra;
+
+    while (1) {
+        contador++;
+
+        // Simulamos la lectura de un sensor de temperatura
+        muestra.id_lectura  = contador;
+        muestra.temperatura = 22.5f + (contador % 5); // Valor ficticio
+
+        ESP_LOGI("PRODUCTOR", "Enviando lectura #%d (%.1f C) a la cola...",
+                 muestra.id_lectura, muestra.temperatura);
+
+        // Enviamos el dato a la cola.
+        // Tercer parametro = 0 ticks: si la cola esta llena, no espera y reporta error.
+        if (xQueueSend(cola_sensor, &muestra, 0) != pdPASS) {
+            ESP_LOGE("PRODUCTOR", "¡Cola llena! Dato descartado.");
+        }
+
+        // Controla cada cuanto mide el sensor (cada 2 segundos)
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
+// -------------------------------------------------------
+// TAREA 2: Consumidora
+// Se bloquea indefinidamente en xQueueReceive (portMAX_DELAY).
+// Consume 0% de CPU mientras no haya datos en la cola.
+// FreeRTOS la despierta automaticamente cuando llega un dato.
+// -------------------------------------------------------
+void vTareaConsumidora(void *pvParameters) {
+    datos_sensor_t dato_recibido;
+
+    while (1) {
+        // portMAX_DELAY = "Duermete indefinidamente, no me despiertes
+        // hasta que alguien ponga un dato en la cola."
+        // Este es el patron correcto para un ESP32-C6 de 1 nucleo.
+        if (xQueueReceive(cola_sensor, &dato_recibido, portMAX_DELAY) == pdPASS) {
+
+            // FreeRTOS despierta esta tarea en cuanto el Productor envia un dato
+            ESP_LOGW("CONSUMIDOR", "Dato recibido! ID: %d | Temp: %.2f C",
+                     dato_recibido.id_lectura,
+                     dato_recibido.temperatura);
+
+            // Aqui iria el procesamiento real: guardar en NVS, enviar por Wi-Fi, etc.
+            // Al terminar el bloque, regresa a xQueueReceive y se vuelve a dormir.
+        }
+    }
+}
+
+// -------------------------------------------------------
+// app_main: Punto de entrada del firmware
+// -------------------------------------------------------
+void app_main(void) {
+    ESP_LOGI(TAG, "=== Sistema de Colas - ESP32-C6 (unico nucleo) ===");
+
+    // 3. Creamos la cola ANTES de lanzar las tareas.
+    //    Capacidad: hasta 5 estructuras 'datos_sensor_t' en espera.
+    cola_sensor = xQueueCreate(5, sizeof(datos_sensor_t));
+
+    if (cola_sensor == NULL) {
+        ESP_LOGE(TAG, "Error critico: no se pudo crear la cola. Abortando.");
+        return; // Sin cola, el sistema no puede funcionar
+    }
+
+    // Creamos primero el Consumidor (prioridad 2)
+    // Estara bloqueado hasta que el Productor envie algo.
+    xTaskCreate(
+        vTareaConsumidora,  // Funcion de la tarea
+        "Consumidor",       // Nombre (visible en monitor de tareas)
+        2048,               // Stack en bytes
+        NULL,               // Sin parametros
+        2,                  // Prioridad
+        NULL                // Sin descriptor necesario
+    );
+
+    // Creamos el Productor (misma prioridad 2)
+    // El planificador repartira tiempo entre ambas (time-slicing).
+    xTaskCreate(
+        vTareaProductora,   // Funcion de la tarea
+        "Productor",        // Nombre
+        2048,               // Stack en bytes
+        NULL,               // Sin parametros
+        2,                  // Prioridad igual -> time-slicing activo
+        NULL                // Sin descriptor necesario
+    );
+
+    ESP_LOGI(TAG, "Tareas creadas. app_main finaliza (FreeRTOS toma el control).");
+    // app_main puede terminar: las tareas siguen vivas gestionadas por FreeRTOS.
+}
