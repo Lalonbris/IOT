@@ -17,7 +17,7 @@ void app_main(void) {
   gpio_reset_pin(BTN_PIN);
   gpio_set_direction(BTN_PIN, GPIO_MODE_INPUT);
 
-  // ¡NUEVO!: Activar la resistencia pull-down interna
+  // Activar la resistencia pull-down interna
   gpio_set_pull_mode(BTN_PIN, GPIO_PULLDOWN_ONLY);
 
   gpio_set_level(LED_PIN, led_state);
